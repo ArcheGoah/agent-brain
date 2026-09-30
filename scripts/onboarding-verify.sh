@@ -216,16 +216,18 @@ if [ -n "$BRAIN" ] && [ -d "$BRAIN" ]; then
     # (':!:onboarding-report*') is anchored at the repo root and missed the default report
     # location docs/maintenance/ — measured 2026-09-15: a tracked report there read as a
     # foreign leak again, the exact self-report #144 removed.
-    # -I with LC_ALL=C skips BINARY files (a NUL byte), and only those: measured 2026-09-30,
-    # a tracked vendor manual (PDF) carries its authors' home paths in its metadata, which
-    # made check 8 red on every machine of that brain, and no own_home_names entry could
-    # fix it. LC_ALL=C keeps a text file with a stray non-UTF-8 byte in the scan: in a
-    # UTF-8 locale grep calls that file binary too, and -I would silently drop it.
+    # `git grep -I` skips BINARY files, and only those: measured 2026-09-30, a tracked vendor
+    # manual (PDF) carries its authors' home paths in its metadata, which made check 8 red on
+    # every machine of that brain, and no own_home_names entry could fix it. git's binary test
+    # (a NUL byte) is the same on every OS; plain `grep -I` is not — BSD grep on macOS also
+    # skipped a text file with one Latin-1 byte (CI, 2026-09-30), a silent hole in the scan.
+    # `[/]`, not a leading `/`: Git Bash rewrites an argument that starts with `/` into a
+    # Windows path before the native git.exe sees it, and the pattern then matches nothing.
     scan_brain() { ( cd "$BRAIN" && git ls-files -z 2>/dev/null \
       | grep -avzE '(^|/)onboarding-report[^/]*$' \
-      | LC_ALL=C xargs -0 -r grep -IhE '/(Users|home)/' 2>/dev/null ); }
+      | xargs -0 -r git grep -I -h -E '[/](Users|home)/' -- 2>/dev/null ); }
   else
-    scan_brain() { LC_ALL=C grep -rIhE '/(Users|home)/' "$BRAIN" --exclude-dir=.git --exclude-dir=core --exclude-dir=node_modules --exclude-dir=.claude-state --exclude='onboarding-report*' 2>/dev/null; }
+    scan_brain() { grep -rhE '/(Users|home)/' "$BRAIN" --exclude-dir=.git --exclude-dir=core --exclude-dir=node_modules --exclude-dir=.claude-state --exclude='onboarding-report*' 2>/dev/null; }
   fi
   hits=$(scan_brain \
     | OWN_NAMES="$(printf '%s\n%s\n%s' "$me" "$myhome" "$own_extra")" awk '
