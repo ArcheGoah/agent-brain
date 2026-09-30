@@ -229,7 +229,10 @@ if [ -n "$BRAIN" ] && [ -d "$BRAIN" ]; then
   else
     scan_brain() { grep -rhE '/(Users|home)/' "$BRAIN" --exclude-dir=.git --exclude-dir=core --exclude-dir=node_modules --exclude-dir=.claude-state --exclude='onboarding-report*' 2>/dev/null; }
   fi
-  hits=$(scan_brain \
+  # LC_ALL=C for the whole chain: under a UTF-8 locale the BSD tools on macOS dropped a line
+  # carrying one Latin-1 byte (CI, 2026-09-30), so a foreign path next to it went unseen.
+  # The extraction charset is ASCII anyway; byte semantics lose nothing here.
+  hits=$(export LC_ALL=C; scan_brain \
     | OWN_NAMES="$(printf '%s\n%s\n%s' "$me" "$myhome" "$own_extra")" awk '
         BEGIN { n = split(ENVIRON["OWN_NAMES"], raw, "\n")
                 for (i = 1; i <= n; i++) if (raw[i] != "") { own[++k] = "/users/" tolower(raw[i]); own[++k] = "/home/" tolower(raw[i]) } }
