@@ -15,6 +15,19 @@ event in the brain's settings (project, project-local or user scope) references
 that helper file. Matching is by helper filename, so path notation (slashes,
 $CLAUDE_PROJECT_DIR vs absolute) never causes a false alarm.
 
+ALSO REPORTED: a gate the template sets to `"onFailure": "block"` (fail closed when the
+hook cannot start, crashes or times out; Claude Code >= 2.1.295) that this brain wires
+without it - "fails open".
+
+ALSO REPORTED: a `permissions.allow` entry of the template that points into the core
+(`Bash(node core/helpers/*)`, `Bash(python3 core/scripts/*)`, ...) which no settings scope
+of this brain grants, verbatim or by a broader glob. Same class as an unwired hook: the
+template reaches a brain once, so a core tool the harness must let the agent run by itself
+(`question-gate.cjs resolve`, `ci-watch.sh`, ...) ends in a permission prompt — or, in auto
+mode, in the classifier refusing it as a workaround. Measured 2026-10-11 on a Windows brain:
+the agent could not close its own answered question, the operator had to run the command by
+hand; the macOS brain, which carries the entry, ran the same command three times that day.
+
 Usage: hook-coverage.py [brain-root]           (default: cwd)
 Output: one line per missing hook — "<event>: <template command>".
 Exit 0 and silent when covered; exit 1 when something is missing.
@@ -25,6 +38,14 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+# The session start parses this output; left to the platform, Windows' console code page
+# mangles the dashes in these lines (os-traps OS-9).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+except (AttributeError, ValueError):  # a stream that cannot be reconfigured
+    pass
 
 
 def load(path):
@@ -51,7 +72,7 @@ def commands_by_event(settings):
             for h in group.get("hooks") or []:
                 cmd = h.get("command") if isinstance(h, dict) else None
                 if cmd:
-                    out.setdefault(event, []).append((matcher, cmd))
+                    out.setdefault(event, []).append((matcher, cmd, h.get("onFailure") or "continue"))
     return out
 
 
@@ -71,7 +92,7 @@ def registered_via_dispatcher(root, wired):
     settings, AND the helper is registered in its config. Either half alone would turn
     this into a way to silence the check by writing a file.
     """
-    if not any("dispatcher" in c for pairs in wired.values() for _, c in pairs):
+    if not any("dispatcher" in c for pairs in wired.values() for _, c, _f in pairs):
         return set()
     cfg = load(os.path.join(root, ".claude", "rules", "stop-checks.json"))
     out = set()
@@ -82,6 +103,21 @@ def registered_via_dispatcher(root, wired):
     return out
 
 
+def allow_entries(settings):
+    return [e for e in ((settings.get("permissions") or {}).get("allow") or []) if isinstance(e, str)]
+
+
+def granted(entry, have):
+    """A template entry is granted when a brain scope carries it verbatim, or a broader glob
+    whose fixed prefix the entry starts with (`Bash(node core/*)` covers `Bash(node core/helpers/*)`)."""
+    for h in have:
+        if h == entry:
+            return True
+        if h.endswith("*)") and entry.startswith(h[:-2]):
+            return True
+    return False
+
+
 def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     template = load(os.path.join(root, "core", "templates", "settings.json"))
@@ -90,13 +126,23 @@ def main():
 
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     wired = {}
+    have_allow = []
     for p in (
         os.path.join(root, ".claude", "settings.json"),
         os.path.join(root, ".claude", "settings.local.json"),
         os.path.join(cfg, "settings.json"),
     ):
-        for event, pairs in commands_by_event(load(p)).items():
+        s = load(p)
+        for event, pairs in commands_by_event(s).items():
             wired.setdefault(event, []).extend(pairs)
+        have_allow.extend(allow_entries(s))
+
+    not_granted = []
+    for entry in allow_entries(template):
+        if re.search(r"core/(helpers|scripts)", entry) and not granted(entry, have_allow):
+            not_granted.append('permissions: "%s" from the core template is not granted here - every run of a core '
+                               'tool it covers ends in a prompt, or in auto mode in the classifier refusing it; add it '
+                               'to .claude/settings.json permissions.allow' % entry)
 
     # A helper can be wired INDIRECTLY: a dispatcher hook runs several checks itself
     # and the settings then name only the dispatcher. Matching on filenames alone
@@ -107,8 +153,9 @@ def main():
 
     missing = []
     narrower = []
+    fail_open = []
     for event, pairs in commands_by_event(template).items():
-        for matcher, cmd in pairs:
+        for matcher, cmd, on_failure in pairs:
             # Any template hook pointing INTO the consumed core counts, not just
             # helpers/. Measured 2026-08-20: brain-check.sh lives in core/scripts, so a
             # brain that never wired it was reported as fully covered — the check that
@@ -120,7 +167,14 @@ def main():
             sub, helper = m.group(1), m.group(2)
             if not os.path.isfile(os.path.join(root, "core", sub, helper)):
                 continue  # not in the consumed core yet: nothing to wire
-            hits = [(m, c) for m, c in wired.get(event, []) if helper in c]
+            hits = [(m, c) for m, c, _f in wired.get(event, []) if helper in c]
+            # A gate the template makes fail CLOSED (onFailure: block, Claude Code >= 2.1.295)
+            # but this brain wires with the default "continue": a crash, a timeout or a
+            # missing script then lets every action through. Field only reaches a brain at
+            # bootstrap, like the hooks themselves, so it is checked the same way.
+            if on_failure == "block" and hits and not any(
+                    f == "block" for _m, c, f in wired.get(event, []) if helper in c):
+                fail_open.append("%s: %s fails open - the template sets \"onFailure\": \"block\"" % (event, helper))
             if hits:
                 # Wired — but a matcher that names fewer tools than the template means
                 # the hook does not run where the template says it must.
@@ -141,9 +195,17 @@ def main():
                 continue  # runs behind a dispatcher, see registered_via_dispatcher()
             missing.append("%s: %s" % (event, cmd))
 
-    for line in missing + narrower:
+    # A wired name guard with no names checks nothing and only says so on stderr, where nobody
+    # reads it (measured 2026-10-10 on a Windows instance: leak-names.json was missing).
+    inert = []
+    if any("public-text-guard" in c for pairs in wired.values() for _, c, _f in pairs):
+        names = (load(str(Path(root) / ".claude" / "rules" / "leak-names.json")) or {})
+        if not (names.get("names") or names.get("instances")):
+            inert.append("PreToolUse: public-text-guard.cjs is wired but .claude/rules/leak-names.json has no names - it checks nothing")
+
+    for line in missing + narrower + fail_open + inert + not_granted:
         print(line)
-    return 1 if (missing or narrower) else 0
+    return 1 if (missing or narrower or fail_open or inert or not_granted) else 0
 
 
 if __name__ == "__main__":

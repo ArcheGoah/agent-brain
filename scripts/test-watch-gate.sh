@@ -98,12 +98,50 @@ check "PR created, watch-pr armed in the turn" "$T/p2.jsonl" allow "$R"
 live_lock "$R/.claude-state/collab-watch/repo-activity-o.pid"
 check "PR created, collab-watch repo watch lives" "$T/p1.jsonl" allow "$R"
 
+# --- a reload asked of the human (class measured 2026-10-11: "/mcp reconnect" asked, no waiter armed, noticed only when the operator said so)
+{ user "update the plugin"; tool Bash "claude plugin install x"; asst "Installed. Please run /mcp to reconnect."; } > "$T/r1.jsonl"
+check "reload asked, no waiter" "$T/r1.jsonl" block "$R"
+{ user "update the plugin"; tool Bash "bash core/scripts/wait-mcp-reconnect.sh ~/.x/mcp-boot.json 900" bg; asst "Please run /mcp to reconnect."; } > "$T/r2.jsonl"
+check "reload asked, waiter armed in the turn" "$T/r2.jsonl" allow "$R"
+{ user "what is the state?"; tool Bash "git status"; asst "Clean. Nothing to reload."; } > "$T/r3.jsonl"
+check "no reload asked" "$T/r3.jsonl" allow "$R"
+{ user "update the plugin"; tool Bash "claude plugin install x"; asst "Bitte /reload-plugins."; } > "$T/r4.jsonl"
+check "reload-plugins asked, no waiter" "$T/r4.jsonl" block "$R"
+# A local command is not a prompt (measured 2026-10-11): the operator's /mcp leaves three
+# frame-only records; the waiter armed before them must stay in the turn.
+CAVEAT='<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request.</local-command-caveat>'
+CMD='<command-name>/mcp</command-name>
+            <command-message>mcp</command-message>
+            <command-args></command-args>'
+OUT='<local-command-stdout>Reconnected to grandma3.</local-command-stdout>'
+{ user "update the plugin"; tool Bash "bash core/scripts/wait-mcp-reconnect.sh ~/.x/mcp-boot.json 900" bg
+  asst "Please run /mcp to reconnect."; user "$CAVEAT"; user "$CMD"; user "$OUT"
+  asst "Back. A reconnect re-read the tool list."; } > "$T/r5.jsonl"
+check "waiter, then the operator's /mcp echo, then the reply" "$T/r5.jsonl" allow "$R"
+{ user "update the plugin"; tool Bash "claude plugin install x"; asst "Please run /mcp to reconnect."
+  user "$CAVEAT"; user "$CMD"; user "$OUT"; asst "Please run /mcp to reconnect again."; } > "$T/r6.jsonl"
+check "negative control: /mcp echo, reload asked, no waiter" "$T/r6.jsonl" block "$R"
+
+# Windows: the hook does not run in Git Bash (measured 2026-10-11) — its PATH holds Git\cmd,
+# not Git\usr\bin, so a bare `ps` is ENOENT and every live watcher read as dead. The gate must
+# find Git's ps.exe itself. Run it with exactly that PATH: node's dir + Git\cmd.
+if command -v cygpath >/dev/null 2>&1 && [ -d "/c/Program Files/Git/cmd" ]; then
+  NODE_DIR="$(dirname "$(command -v node)")"
+  live_lock "$R/.claude-state/shared-memory-watch.pid"
+  fresh; entry answer2.md ws mac
+  out="$(printf '{"transcript_path":"%s","stop_hook_active":false}' "$(native "$T/t1.jsonl")" \
+    | PATH="$NODE_DIR:/c/Program Files/Git/cmd" CLAUDE_PROJECT_DIR="$(native "$R")" SHARED_MEMORY_REPO="$(native "$SM")" \
+      SHARED_MEMORY_SELF="ws" "$NODE_DIR/node" "$(native "$G")" 2>&1)"
+  [ -z "$out" ] && ok "Windows hook PATH (no Git\\usr\\bin): a live watcher still counts" || bad "Windows hook PATH: live watcher read as dead: '$out'"
+  rm -rf "$R/.claude-state"
+fi
+
 # negative control: an always-allow stub must fail every must-block case, or the
 # block assertions above prove nothing
 printf 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));
 ' > "$T/stub.cjs"
 G0="$G"; G="$T/stub.cjs"; before=$fail; fail=0
-for c in t1 t2 p1; do check "stub on $c" "$T/$c.jsonl" block "$R" >/dev/null; done
+for c in t1 t2 p1 r1 r4; do check "stub on $c" "$T/$c.jsonl" block "$R" >/dev/null; done
 caught=$fail; G="$G0"; fail=$before
 [ "$caught" = 1 ] && ok "always-allow stub fails the must-block cases" || bad "negative control: stub passed every must-block case"
 

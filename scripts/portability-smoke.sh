@@ -340,13 +340,14 @@ esac
 #     (the v1.3.12 class-gate shipped consumed-but-wired-nowhere on a live brain);
 #     a fully wired brain must stay silent. CLAUDE_CONFIG_DIR points into the
 #     fixture so the runner's real user settings can never leak into the check.
-mkdir -p "$T/hookbrain/core/templates" "$T/hookbrain/core/helpers" "$T/hookbrain/.claude" "$T/nocfg"
+mkdir -p "$T/hookbrain/core/templates" "$T/hookbrain/core/helpers" "$T/hookbrain/.claude/rules" "$T/nocfg"
+printf '{"names": ["placeholder"], "instances": []}\n' > "$T/hookbrain/.claude/rules/leak-names.json"
 cp "$CORE/templates/settings.json" "$T/hookbrain/core/templates/"
 cp "$CORE"/helpers/*.cjs "$CORE"/helpers/*.sh "$T/hookbrain/core/helpers/" 2>/dev/null
 printf '{}\n' > "$T/hookbrain/.claude/settings.json"
 _hc="$(CLAUDE_CONFIG_DIR="$T/nocfg" "$PY" "$CORE/scripts/hook-coverage.py" "$T/hookbrain" 2>&1)"; _rc=$?
 case "$_rc:$_hc" in
-  1:*"Stop:"*class-gate.cjs*) ok "hook-coverage flags an unwired template hook (exit 1)";;
+  1:*"Stop: "*) ok "hook-coverage flags an unwired template hook (exit 1)";;
   *) bad "hook-coverage missing-hook case: rc=$_rc out='$(printf '%s' "$_hc" | head -1)'";;
 esac
 cp "$CORE/templates/settings.json" "$T/hookbrain/.claude/settings.json"
@@ -356,6 +357,53 @@ if [ "$_rc" -eq 0 ] && [ -z "$_hc" ]; then
 else
   bad "hook-coverage false alarm: rc=$_rc out='$(printf '%s' "$_hc" | head -1)'"
 fi
+#     A template permission into the core that no scope grants is reported (measured
+#     2026-10-11: a Windows brain without `Bash(node core/helpers/*)` could not run
+#     `question-gate.cjs resolve` by itself); a BROADER glob counts as granted.
+"$PY" -c 'import json,sys
+p=sys.argv[1]; d=json.load(open(p,encoding="utf-8")); d["permissions"]["allow"]=[]
+json.dump(d,open(p,"w",encoding="utf-8"),indent=2)' "$T/hookbrain/.claude/settings.json"
+_hc="$(CLAUDE_CONFIG_DIR="$T/nocfg" "$PY" "$CORE/scripts/hook-coverage.py" "$T/hookbrain" 2>&1)"; _rc=$?
+case "$_rc:$_hc" in
+  1:*'permissions: "Bash(node core/helpers/*)" from the core template is not granted'*) ok "hook-coverage names a core permission the brain does not grant";;
+  *) bad "hook-coverage permission case: rc=$_rc out='$(printf '%s' "$_hc" | head -1)'";;
+esac
+"$PY" -c 'import json,sys
+p=sys.argv[1]; d=json.load(open(p,encoding="utf-8"))
+d["permissions"]["allow"]=["Bash(node core/*)","Bash(python3 core/*)","Bash(bash core/*)","Bash(core/scripts/*)"]
+json.dump(d,open(p,"w",encoding="utf-8"),indent=2)' "$T/hookbrain/.claude/settings.json"
+_hc="$(CLAUDE_CONFIG_DIR="$T/nocfg" "$PY" "$CORE/scripts/hook-coverage.py" "$T/hookbrain" 2>&1)"; _rc=$?
+case "$_hc" in
+  *permissions:*) bad "hook-coverage permission false alarm with broader globs: '$(printf '%s' "$_hc" | grep -a permissions: | head -1)'";;
+  *) ok "hook-coverage accepts a broader glob as granted";;
+esac
+cp "$CORE/templates/settings.json" "$T/hookbrain/.claude/settings.json"
+#     A gate wired WITHOUT the template's "onFailure": "block" fails open on a crash or a
+#     timeout (Claude Code >= 2.1.295); hook-coverage names it. Strip the field from the
+#     wired copy of mechanism-guard only - the other gates stay silent.
+"$PY" -c 'import json,sys
+p=sys.argv[1]; d=json.load(open(p,encoding="utf-8"))
+for gs in d["hooks"].values():
+    for g in gs:
+        for h in g["hooks"]:
+            if "mechanism-guard" in h.get("command",""): h.pop("onFailure",None)
+json.dump(d,open(p,"w",encoding="utf-8"),indent=2)' "$T/hookbrain/.claude/settings.json"
+_hc="$(CLAUDE_CONFIG_DIR="$T/nocfg" "$PY" "$CORE/scripts/hook-coverage.py" "$T/hookbrain" 2>&1)"; _rc=$?
+case "$_rc:$_hc" in
+  1:*"PreToolUse: mechanism-guard.cjs fails open"*)
+    case "$_hc" in *file-guard*) bad "hook-coverage fail-open names a gate that carries the field";;
+      *) ok "hook-coverage flags a gate wired without onFailure: block";; esac;;
+  *) bad "hook-coverage fail-open case: rc=$_rc out='$(printf '%s' "$_hc" | head -1)'";;
+esac
+cp "$CORE/templates/settings.json" "$T/hookbrain/.claude/settings.json"
+#     The name guard wired with an EMPTY watch list checks nothing - named, not silent.
+printf '{"names": [], "instances": []}\n' > "$T/hookbrain/.claude/rules/leak-names.json"
+_hc="$(CLAUDE_CONFIG_DIR="$T/nocfg" "$PY" "$CORE/scripts/hook-coverage.py" "$T/hookbrain" 2>&1)"; _rc=$?
+case "$_rc:$_hc" in
+  1:*"public-text-guard.cjs is wired but"*"checks nothing"*) ok "hook-coverage flags a name guard with an empty watch list";;
+  *) bad "hook-coverage inert-guard case: rc=$_rc out='$(printf '%s' "$_hc" | head -1)'";;
+esac
+printf '{"names": ["placeholder"], "instances": []}\n' > "$T/hookbrain/.claude/rules/leak-names.json"
 #     And the bootup voices it: the fixture brain gets the template but an empty
 #     settings file — the !! line is the carrier that repeats until it is fixed.
 printf '{}\n' > "$T/hookbrain/.claude/settings.json"
@@ -463,6 +511,11 @@ fi
 mkdir -p "$T/dispbrain/.claude/rules" "$T/dispbrain/core"
 cp -R "$CORE/helpers" "$T/dispbrain/core/helpers"
 cp -R "$CORE/templates" "$T/dispbrain/core/templates"
+# Its OWN template that demands class-gate as a single Stop hook: the real template wires
+# only the dispatcher since it ships stop-checks.json, and a capability asserted against
+# whatever the real template contains would measure that content instead.
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node \\"$CLAUDE_PROJECT_DIR/core/helpers/class-gate.cjs\\""}]}]}}\n' \
+  > "$T/dispbrain/core/templates/settings.json"
 printf '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"node \\"$CLAUDE_PROJECT_DIR/core/helpers/stop-dispatcher.cjs\\""}]}]}}\n' \
   > "$T/dispbrain/.claude/settings.json"
 printf '{"checks":[{"label":"C","marker":"CLASS-GATE","cmd":"core/helpers/class-gate.cjs","mode":"block"}]}\n' \

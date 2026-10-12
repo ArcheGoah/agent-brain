@@ -48,6 +48,10 @@ const HOOK_ECHO = /^Stop hook feedback:/;
 const TAIL_BYTES = 4 * 1024 * 1024;
 const CLOSED = new Set(['answered', 'done', 'decided', 'info', 'closed']);
 const PR_WATCH = /\b(watch-pr|ci-watch|collab-watch)\.sh\b/;
+// A reload the HUMAN has to do (operator order 2026-08-06, sharpened 2026-10-11): the reply names the slash command or says
+// reconnect. The waiter is core/scripts/wait-mcp-reconnect.sh, armed in the same turn BEFORE the request.
+const RELOAD_ASK = /(?:^|[\s`'"(])\/(?:mcp|reload-plugins)\b|\breconnect\b|\bre-?connecten\b|\bwieder verbinden\b/i;
+const RELOAD_WATCH = /\bwait-mcp-reconnect\.sh\b/;
 
 let data = '';
 process.stdin.setEncoding('utf8');
@@ -77,7 +81,7 @@ function promptText(msg) {
 
 /** Tool calls of the running turn, its start time, and whether this gate already fired in it. */
 function turn(tp) {
-  let calls = []; let since = ''; let fired = false;
+  let calls = []; let since = ''; let fired = false; let lastText = '';
   for (const line of readTail(tp)) {
     if (!line.trim()) continue;
     let d; try { d = JSON.parse(line); } catch (e) { continue; }
@@ -87,10 +91,12 @@ function turn(tp) {
       if (t === null) continue;
       if (HOOK_ECHO.test(t)) { if (OWN_ECHO.test(t)) fired = true; continue; }
       if (isNotification(t)) continue;
-      calls = []; since = d.timestamp || ''; fired = false;
+      calls = []; since = d.timestamp || ''; fired = false; lastText = '';
       continue;
     }
     if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      const text = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      if (text.trim()) lastText = text;
       for (const b of msg.content) {
         if (b.type !== 'tool_use') continue;
         const inp = b.input || {};
@@ -98,7 +104,7 @@ function turn(tp) {
       }
     }
   }
-  return { calls, since, fired };
+  return { calls, since, fired, lastText };
 }
 
 /**
@@ -106,15 +112,46 @@ function turn(tp) {
  * without a shell. The pid must be digits only. On Windows the lock holds an MSYS pid that
  * node's process.kill cannot see, so Git's `ps -p` answers there (measured 2026-10-09:
  * exit 0 for a live watcher, 1 for a dead pid).
+ *
+ * That measurement ran from Git Bash, where `ps` is on PATH. The hook itself does not run
+ * there (measured 2026-10-11, Windows instance): the PATH Claude Code hands to its children
+ * holds `Git\cmd`, not `Git\usr\bin`, so `ps` was ENOENT, every lock read as dead, and the
+ * gate blocked every push of a waiting fact file with the watcher alive. So Git's own
+ * `ps.exe` is found next to the `git.exe` on PATH (`<Git>\cmd\git.exe` -> `<Git>\usr\bin`).
+ * Returns true / false, or null when no `ps` can be run at all — unknown, not dead.
  */
+function psCandidates() {
+  const out = ['ps'];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir && fs.existsSync(path.join(dir, 'git.exe'))) out.push(path.resolve(dir, '..', 'usr', 'bin', 'ps.exe'));
+  }
+  if (process.env.ProgramFiles) out.push(path.join(process.env.ProgramFiles, 'Git', 'usr', 'bin', 'ps.exe'));
+  return [...new Set(out)];
+}
+
 function alive(lock) {
-  try {
-    const pid = fs.readFileSync(lock, 'utf8').trim();
-    if (!/^\d+$/.test(pid)) return false;
-    if (process.platform !== 'win32') { process.kill(Number(pid), 0); return true; }
-    execFileSync('ps', ['-p', pid], { stdio: 'ignore', timeout: 5000 });
-    return true;
-  } catch (e) { return false; }
+  let pid;
+  try { pid = fs.readFileSync(lock, 'utf8').trim(); } catch (e) { return false; }
+  if (!/^\d+$/.test(pid)) return false;
+  if (process.platform !== 'win32') {
+    try { process.kill(Number(pid), 0); return true; } catch (e) { return false; }
+  }
+  for (const ps of psCandidates()) {
+    try {
+      execFileSync(ps, ['-p', pid], { stdio: 'ignore', timeout: 5000 });
+      return true;
+    } catch (e) {
+      if (e.code === 'ENOENT') continue;
+      return false;
+    }
+  }
+  return null;
+}
+
+/** Any lock alive -> true; none alive but one unknown -> null (cannot measure); else false. */
+function anyAlive(locks) {
+  const r = locks.map(alive);
+  return r.includes(true) ? true : (r.includes(null) ? null : false);
 }
 
 function stateDirs(root) {
@@ -123,16 +160,17 @@ function stateDirs(root) {
   return { sm: [process.env.SHARED_MEMORY_LOCK_DIR || base, collab], collab };
 }
 
+// A liveness that cannot be measured counts as watched: the gate fails open (header).
 function smWatched(root) {
-  return stateDirs(root).sm.some((d) => alive(path.join(d, 'shared-memory-watch.pid')));
+  return anyAlive(stateDirs(root).sm.map((d) => path.join(d, 'shared-memory-watch.pid'))) !== false;
 }
 
 function prWatched(root, calls) {
   if (calls.some((c) => (c.name === 'Monitor' || c.bg) && PR_WATCH.test(c.cmd))) return true;
   const dir = stateDirs(root).collab;
-  try {
-    return fs.readdirSync(dir).some((f) => /^repo-activity.*\.pid$/.test(f) && alive(path.join(dir, f)));
-  } catch (e) { return false; }
+  let locks;
+  try { locks = fs.readdirSync(dir).filter((f) => /^repo-activity.*\.pid$/.test(f)).map((f) => path.join(dir, f)); } catch (e) { return false; }
+  return anyAlive(locks) !== false;
 }
 
 function tokens(s) { return new Set(String(s || '').toLowerCase().split(/[\s,;]+/).filter(Boolean)); }
@@ -170,7 +208,7 @@ function awaiting(repo, since) {
 function main(input) {
   if (input.stop_hook_active || !input.transcript_path) process.exit(0);
   const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
-  const { calls, since, fired } = turn(input.transcript_path);
+  const { calls, since, fired, lastText } = turn(input.transcript_path);
   if (fired) process.exit(0);
   const shell = calls.filter((c) => c.name === 'Bash' || c.name === 'PowerShell');
   const missing = [];
@@ -182,12 +220,17 @@ function main(input) {
     const files = awaiting(repo, since);
     if (files.length && !smWatched(root)) {
       missing.push(`shared-memory: ${files.slice(0, 3).join(', ')} waits on another party — arm `
-        + 'Monitor({command: "bash core/scripts/shared-memory-watch.sh watch 300", persistent: true}) '
+        + 'Monitor({command: "bash core/scripts/shared-memory-watch.sh watch 60", persistent: true}) '
         + '(or collab-watch); mark a pure report `status: info`');
     }
   }
   if (shell.some((c) => /\bgh\s+pr\s+create\b/.test(c.cmd)) && !prWatched(root, calls)) {
     missing.push('PR created — arm Monitor on core/scripts/watch-pr.sh <owner>/<repo> <nr> (or collab-watch)');
+  }
+  // (c) the reply ends by asking the human for a reload, and nothing waits for it to arrive
+  if (RELOAD_ASK.test(lastText) && !calls.some((c) => RELOAD_WATCH.test(c.cmd))) {
+    missing.push('reload requested from the human — arm core/scripts/wait-mcp-reconnect.sh <boot-stamp-file> [timeout_s] '
+      + '(Monitor or run_in_background) BEFORE asking, then say which reload you need');
   }
   if (!missing.length) process.exit(0);
   process.stdout.write(JSON.stringify({

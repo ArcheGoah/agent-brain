@@ -48,6 +48,17 @@ Monitor({ command: "bash core/scripts/collab-watch.sh",
   drops events for good (cursors advance before the filter). **Before arming a filtered
   scope, count the same window unfiltered once** — unfiltered n>0 and filtered 0 means
   the filter is suspect, not the world quiet.
+- **A session that owns a topic arms it too:** `COLLAB_WATCH_TOPICS="<topic> …"` next to a
+  party scope. A repo watch whose tag is a topic, and a shared-memory find in a `<topic>/`
+  folder, then pass from EVERY party — the operator's other machine included. Without it a
+  one-collaborator scope drops the other own machine's PRs in the very repo the session owns
+  (measured 2026-10-11).
+- **Leaving an item to another session is a hand-over, delivered to THAT session.** When
+  several sessions on one machine split the work by topic, an item one of them declines goes
+  to the session that owns the topic (session message, or a shared-memory note in its topic
+  folder its watch reports) — never only back to the sender ("ask the other session"). An
+  answer to the sender alone reaches nobody who acts: measured 2026-10-11, three points of the
+  operator's other machine lay unworked for hours this way until the operator asked.
 - **Never add an author filter on the operator's login.** All own machines push under one
   account; the filter would swallow the other own machine — the very signal wanted.
 - **"already armed"** names a live PID, not a session. Check `ps` and its parent chain
@@ -87,9 +98,14 @@ opt-out and holds for that session only.
    `gh pr view <nr> --json mergeable` (`CONFLICTING` = rebase, not "CI broken"); an empty
    `gh run list --branch <branch>` plus an empty check rollup = CI is not firing, a report
    event for the operator. A second branch as a control comes BEFORE any outage diagnosis.
-4. **Merge by ownership — the instance's merge rules decide**, typically: a repo with one
-   responsible owner → that owner merges; a jointly owned core → the maintainers merge
-   after a counter-check; otherwise the author merges. Never with own open findings. Merge
+4. **Merge when both sides said yes — whoever comes first** (operator decision 2026-10-11:
+   a ready PR that waits for one particular person "hangs for nothing"). Shared work is
+   merged by whichever party gets to it first, once ALL of these hold: the author reported
+   it done (or verified it live), the other side reviewed it OK, CI is green, the repo's
+   conventions are met, and the reviewed commit IS the head. Leave a one-line comment in
+   the PR saying who merged and on which two OKs. Exceptions are the instance's merge rules
+   (a jointly owned core: its maintainers merge after the counter-check); releases (tag,
+   pin) stay with the repo's owner. Never with own open findings. Merge
    with `--match-head-commit <reviewed sha>` in the repo's style (merge vs. squash).
    "CI green" speaks about code, never about whether the author is done.
    **A refused merge is a decision, not an obstacle:** when the permission layer refuses

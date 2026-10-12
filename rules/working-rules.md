@@ -176,7 +176,12 @@ same topic lands in the same layout:
    repo grow that repo's own auto-memory; the brain memory keeps pointers.
    As soon as a second brain works the project: `reach: shared` entries and
    one-file-one-fact exports to the org's shared-memory repo, with a
-   back-reference to the source `id`.
+   back-reference to the source `id`. **The project gets its own AREA there in
+   the same pass** (operator order 2026-10-10): folder + `LOG.md` + a line in
+   the README's area list — never filed into the catch-all folder "for now".
+   Measured: a catch-all held 150 entries, whole projects among them, because
+   nothing said when an area is due. Carrier: `core/scripts/shared-memory-lint.py`,
+   check "project without an area".
 5. **Register the ledger with the instance's aggregator.** The generated
    overview sees only registered detail lists — an unregistered domain is
    invisible by construction (deliberate: no silent glob fallback). Adding the
@@ -247,11 +252,20 @@ A question ENDS the turn only when the next step of the order cannot proceed wit
 answer AND the answer belongs to the operator — the instance names its list of
 operator-only matters (goal, money, hardware, risk, external effect, release) in ONE place.
 
-**Mechanically secured:** `core/helpers/mechanism-guard.cjs` (PreToolUse/Bash) blocks
-shortcuts for which a documented path exists, and demands either the process or an
-explicit `# MECHANISM-OK: <reason>` marker. The rules for it are instance knowledge:
-`.claude/rules/mechanism-rules.json` (every newly discovered shortcut gets added
-there — the system learns, not just the agent).
+**Mechanically secured:** `core/helpers/mechanism-guard.cjs` (PreToolUse on
+Bash/Monitor and Write/Edit) blocks shortcuts for which a documented path exists, and
+demands either the process or an explicit `# MECHANISM-OK: <reason>` marker. Two sources
+of rules: the instance's own (`.claude/rules/mechanism-rules.json` — rig, doc paths) and
+the TOOL's own: a tool that is meant to be driven through its MCP server ships
+`mechanism-rules.json` at its root naming its internals (IPC files, running its server by
+hand, GUI drivers), and the guard finds it whether the tool arrives as a clone in
+`.mcp.json` or as an enabled plugin. Every newly discovered shortcut gets added where it
+belongs — the system learns, not just the agent. (Incident 2026-10-11: a defined path was
+not available on a second machine; the session built its own client and wrote straight
+into the tool's IPC file instead of reporting. Not available = report, THIRD CASE above.)
+**A request to another machine names the defined path AS IT EXISTS THERE** — read how that
+machine runs the tool (clone or plugin, version) before writing the steps; a step that only
+works on the sender's setup turns the receiver's next move into improvisation.
 
 ## One System, Not Local Workarounds (HARD, operator order 2026-10-08)
 
@@ -270,6 +284,27 @@ Allowed deviations are DECLARED, with the reason, in `.claude/rules/local-machin
   items declared instance-only were general).
 - **alpha** — a development checkout under test, with an expiry date and what is being
   measured. Past the date: merge, extend with a reason, or unwire.
+
+**A suite that ships as a plugin is consumed as the plugin** (operator order 2026-10-11: no
+special-purpose tinkering — here, at collaborators, in other instances). Its MCP server and
+skills come from the marketplace on every machine; a clone of the suite feeds a brain only to
+check a PR head, as a declared alpha with a date, and goes back afterwards. A suite's name is
+not an instance identity token: it names shared tooling and cannot prove an item instance-only.
+Carried by `core/scripts/local-machinery.py`, class `clone` (a suite clone wired as MCP server
+or skill source while an added marketplace publishes that repo).
+
+**A fork is not a place for work** (operator direction 2026-10-11: the core exists to give
+everyone the same state; a time-boxed local alpha is how a new feature reaches it, but an
+unnoticed drift away from it must not happen — the default is not to turn off, but to find
+the common way and build on it). Core work happens on a branch IN the core repo — every
+collaborator has write access there, so a branch is seen, gets CI and reaches the others;
+a fork branch gets none of that and is forgotten. A brain consumes the core only from the
+org repo at the released pin, never from a fork. Finished work is a PR in the repo;
+everything else is a declared alpha with an expiry. Measured the day the rule was written:
+two collaborator forks, their main far behind, about twenty leftover branches of merged
+PRs, one fix that had lived only on a fork branch for six weeks, and one open PR still
+served from a fork. Carried by `core/scripts/fork-drift.py` in the brain-scan's machine
+checks: it names fork work that never reached the core and a core consumed from a fork.
 
 **The finding addresses the AI, not the operator** (operator, same day: "the human does not
 have to be bothered every time something deviates, but there should be a classification and
@@ -388,6 +423,13 @@ their AIs:
    nobody — use the proper name. The person and their AI are named apart ("<name>" vs.
    "<name>'s AI"): a proposal of an AI is not a decision of its person. Machine ids stay
    in data fields; a git author is no proof of the party (accounts can look alike).
+   **One login can carry several instances** (operator order 2026-10-11, after a hand-over
+   between the operator's own machines lay unseen until the operator asked on every side):
+   every PR, comment and review an AI posts carries its instance key
+   (`<!-- instance-key: … -->`, a hash, names nobody — `core/helpers/instance-key-gate.cjs`
+   refuses the post without it), and every check that decides "is this mine?" decides by
+   login AND key (`core/scripts/instance_key.py`). A PR from a sibling instance under the same
+   login is a hand-over to us, not our own.
 2. **Responsibility is assigned only by the operator** (operator decision 2026-08-19). An
    assignment is STATE with a date — measure it (`core/scripts/parallel-sessions.sh`, the
    shared-memory record) before leaving work out, never recall it (2026-08-21). A new
@@ -398,3 +440,13 @@ their AIs:
 4. **Judge the sum, not the single change** (operator decision 2026-08-31): what counts
    is what all of this side's changes together mean for the other party — four small
    interventions are one big one.
+5. **One finding, one builder** (operator correction 2026-10-11: "you crossed each other
+   there for nothing — that costs time"). Whoever reports a finding on a PR says in the same
+   comment whether they build the fix ("PR follows" / "the author's" / "open for anyone").
+   Whoever wants to build a fix for SOMEONE ELSE's finding first reads the repo's open PRs
+   (`gh pr list --state open`) and the thread: an existing PR or a claim means counter-check,
+   not build; nothing there means one line in the thread ("building it"), then build. And
+   nothing is merged over an open finding in its thread — read the comments in full, never
+   through a tool that cuts them short. Measured the day the rule was written: one finding,
+   two fixes from two machines three minutes apart (one closed), and a merge over the finding
+   because a reader showed 200 characters of the comment.

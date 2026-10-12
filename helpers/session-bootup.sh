@@ -45,6 +45,18 @@ HOOK_INPUT=""
 PSC_SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 cd "$R" || exit 0
 
+# Time budget (class carrier, 2026-10-11): this hook is killed at its timeout, and a killed
+# bootup reports NOTHING — the incident of 2026-09-13 (93.6 s against 30 s, killed at every
+# start for three weeks) came back the same way: 9 s at the end of September, 14 s on Oct 6,
+# 20 s on Oct 10, killed on Oct 11. Each new check is cheap on its own; the sum grows silently
+# until the kill swallows the report that would have said so. So the body stamps the end of
+# each part, and the closing block below names the total and the slowest parts once two thirds
+# of the limit are used — while the report still arrives. Whole seconds (macOS bash 3.2 has no
+# EPOCHREALTIME); the body runs in a subshell, so the stamps go through a file.
+BOOT_T0=$(date +%s)
+BOOT_PARTS=$(mktemp "${TMPDIR:-/tmp}/bootup-parts.XXXXXX" 2>/dev/null || true)
+boot_mark() { [[ -n "${BOOT_PARTS:-}" ]] && printf '%s %s\n' "$1" "$(date +%s)" >> "$BOOT_PARTS"; return 0; }
+
 bootup_body() {
 
 echo "=== BRAIN BOOTUP CHECK ($(date '+%F %T')) ==="
@@ -56,6 +68,13 @@ unpushed=$(git log --branches --not --remotes --oneline 2>/dev/null | wc -l | tr
 gwarn=""
 [[ "$unpushed" -gt 0 ]] && gwarn=" !! NO REMOTE BACKUP for $unpushed commits (F5 open)"
 echo "git: branch=$br uncommitted=$dirty unpushed=$unpushed$gwarn"
+
+# Which machine this is (identity from config/machines/<key>.md) and which tools it has
+# (measured now, never read from a file). Opt-in: silent without config/machines/.
+boot_mark git
+if [[ -f "$HERE/../scripts/machine-profile.sh" ]]; then
+  bash "$HERE/../scripts/machine-profile.sh" "$R" 2>/dev/null
+fi
 
 # Submodule pin drift (incident 2026-08-13, Windows brain): core/ sat on a PR review
 # branch when a parent commit swept the moving gitlink in as the new pin — the accident
@@ -77,6 +96,7 @@ done < <(git submodule status 2>/dev/null)
 # consuming channel is behind it, ONE line offers ONE command. Claude asks the
 # operator before running it (check always, update only after an OK). Offline or
 # no gh: silently skipped — a missing answer is not a finding.
+boot_mark machine-profile+submodules
 upd=$("$PY" - <<'PY' 2>/dev/null
 import json, os, subprocess, sys
 def load(p):
@@ -139,8 +159,8 @@ if core_pin and os.path.isdir("core"):
             ahead = False
     if sub != core_pin:
         if ahead:
-            print(f"__AHEAD__core rules {sub} is AHEAD of the pin {core_pin} -- "
-                  f"verification checkout; brain-update.sh would move it back")
+            print(f"__AHEAD__core checkout {sub} is ahead of the pin {core_pin}: a verification "
+                  f"checkout, fine while you test a PR; brain-update.sh puts it back on the pin")
         else:
             stale.append(f"core rules {sub or 'unknown'} -> {core_pin}")
 plugs = load(os.path.join(cfg, "plugins", "installed_plugins.json")).get("plugins") or {}
@@ -190,6 +210,7 @@ fi
 # docstring) and stamps it onto the REPO entry as `consumer_plugin`. That field is read
 # here directly, no reverse lookup, no name-vs-name guessing. A suite with no such field
 # keeps the checkout check unchanged — for it, the checkout IS the consumer.
+boot_mark core-update
 supd=$("$PY" - <<'PY' 2>/dev/null
 import json, os, re, subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -231,13 +252,14 @@ if suites:
 PY
 )
 if [[ -n "$supd" ]]; then
-  echo "!! suite update available: $supd — ask the operator; consumer checkouts: bash core/scripts/suite-install.sh <suite> (a developer checkout refuses safely — pull it by hand)"
+  echo "!! suite update available: $supd — ask the operator; consumer checkouts: bash core/scripts/suite-install.sh SUITE (a developer checkout refuses safely — pull it by hand)"
 fi
 
 # Open PRs across the ecosystem (operator order 2026-08-13): NAME them at session
 # start — visibility only. Merging is maintainer work through the review pipeline;
 # this line never offers it. Owner derived from the marketplace repo in settings
 # (no hardcoded org — core is generic). One search call, offline-silent, capped.
+boot_mark suite-update
 eco_owner=$("$PY" -c '
 import json, os
 def load(p):
@@ -258,13 +280,14 @@ for s in (load(".claude/settings.json"), load(os.path.join(cfg, "settings.json")
 # two days unanswered while both sides saw those lines. scripts/pr-ball.py reads GitHub's
 # own review/commit timestamps and prints one line only when a move has been open for 24 h.
 # One GraphQL call, offline-silent like the search above.
+boot_mark pr-search
 if [[ -n "$eco_owner" && -f "$HERE/../scripts/pr-ball.py" ]]; then
   gh api graphql -f q="user:$eco_owner is:pr is:open" -f query='query($q: String!) { viewer { login }
     search(query: $q, type: ISSUE, first: 40) { nodes { ... on PullRequest {
       number isDraft body repository { name } author { login }
-      commits(last: 1) { nodes { commit { committedDate } } }
-      reviews(last: 30) { nodes { author { login } state submittedAt } }
-      comments(last: 30) { nodes { author { login } createdAt } }
+      commits(last: 1) { nodes { commit { oid committedDate } } }
+      reviews(last: 30) { nodes { author { login } state submittedAt body } }
+      comments(last: 30) { nodes { author { login } createdAt body } }
       reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } } } } } } } }' 2>/dev/null \
     | "$PY" "$HERE/../scripts/pr-ball.py" 2>/dev/null
 fi
@@ -273,6 +296,7 @@ fi
 # call per repo (~7.7 s measured), so cached for 6 h and refreshed in the background —
 # foreign state, time is the only key. Printed only when there is something to act on;
 # a reused result carries its age (cached-verdict's own line).
+boot_mark pr-ball
 if [[ -n "$eco_owner" && -f "$HERE/../scripts/code-scanning-alerts.sh" && -f "$HERE/../scripts/cached-verdict.sh" ]]; then
   csa=$(bash "$HERE/../scripts/cached-verdict.sh" code-scanning --max-age 21600 --background-on-miss \
         -- bash "$HERE/../scripts/code-scanning-alerts.sh" "$eco_owner" 2>/dev/null)
@@ -283,6 +307,7 @@ fi
 # hooks, scheduled jobs, plugins, ...) — undeclared or unproven items, near-copies of core
 # tools, expired alphas, files edited inside core/; last line = summary counts. Measured on the proving
 # brain: 12 of 31 hook entries ran from unmerged checkouts, unnoticed because all of them worked.
+boot_mark code-scanning
 if [[ -f "$HERE/../scripts/local-machinery.py" ]]; then
   "$PY" "$HERE/../scripts/local-machinery.py" --repo "$R" 2>/dev/null || true
 fi
@@ -290,6 +315,7 @@ fi
 # Memory limits (enforced since Claude Code v2.1.83: 200 lines / 25 KB — CHANGELOG entry
 # "MEMORY.md index now truncates at 25KB as well as 200 lines" is in the 2.1.83 block.
 # Until 2026-08-04 this said v2.1.210; the numbers were right, the attribution wasn't.)
+boot_mark local-machinery
 if [[ -f "$M" ]]; then
   ml=$(wc -l < "$M" | tr -d ' '); mb=$(wc -c < "$M" | tr -d ' ')
   mwarn=""; (( ml > 180 || mb > 23000 )) && mwarn=" !! near limit"
@@ -307,7 +333,8 @@ if [[ -f "$HERE/../scripts/always-loaded.py" ]]; then
 fi
 
 # Questions to the operator that were never settled (question-gate.cjs): listed every
-# start until answered/dropped — a postponed question must not scroll away for good.
+# start until answered/dropped — neither a question the operator postponed (deferred) nor one
+# they replied past (unanswered) may scroll away for good.
 if command -v node >/dev/null 2>&1 && [[ -f "$HERE/question-gate.cjs" ]]; then
   CLAUDE_PROJECT_DIR="$R" node "$HERE/question-gate.cjs" list 2>/dev/null
 fi
@@ -316,6 +343,12 @@ fi
 # silent offline). A wrong clock corrupts commit timestamps and every since= cursor.
 if [[ -f "$HERE/../scripts/clock-skew.py" ]]; then
   "$PY" "$HERE/../scripts/clock-skew.py" 2>/dev/null
+fi
+
+# Orphans: processes an earlier session left running (no parent, >1 h, from a session
+# folder). Reports only, never ends one; wanted services are declared by the instance.
+if [[ -f "$HERE/../scripts/orphan-check.py" ]]; then
+  "$PY" "$HERE/../scripts/orphan-check.py" --repo "$R" 2>/dev/null
 fi
 
 # Settings JSON valid?
@@ -414,6 +447,7 @@ lg=$(grep -lE 'autonomer-lauf|kohaerenz-scan' .claude/rules/*.md 2>/dev/null)
 # brain-core checkout — foreign branches, force push, troubleshooting against the
 # wrong machine. Visibility is the fix; the rules live in memory agent-datei-kollision.)
 # PSC_SELF comes from the top level: $0 HERE in zsh would be the function name, not the path.
+boot_mark memory+settings+small-checks
 if [[ -n "${PSC_SELF:-}" && -f "$PSC_SELF/../scripts/parallel-sessions.sh" ]]; then
   # Exit 1 carries its own warning (^!! lines). Exit 2 has meant "check not
   # performable" since PR #19 — that is NOT green and must be voiced here,
@@ -422,7 +456,8 @@ if [[ -n "${PSC_SELF:-}" && -f "$PSC_SELF/../scripts/parallel-sessions.sh" ]]; t
   if [[ $ps_rc -eq 2 ]]; then
     echo "!! parallel-sessions: check not performable — collision state UNKNOWN, do not count as green"
   else
-    grep '^!!' <<<"$ps_out" || true
+    # `note:` = the machine-wide count without lsof (Windows): says what it knows, no `!!`.
+    grep -E '^!!|^note:' <<<"$ps_out" || true
   fi
 fi
 
@@ -511,12 +546,14 @@ fi
 # looked. Level 1 of the pair; level 2 (scripts/shared-memory-watch.sh) watches while
 # the session runs. Silent when the repo is not cloned or nothing is new — an instance
 # that does not take part must not be nagged, and a clean check is not a line.
+boot_mark sessions+scan+orders
 [[ -f "$HERE/shared-memory-check.sh" ]] && OPEN_ITEMS_IN_BOOTUP=1 bash "$HERE/shared-memory-check.sh" 2>/dev/null
 # OPEN FOR US (operator correction 2026-10-07): every open request to this instance and
 # every open PR, one list, with how many sessions already reported each item — louder on
 # every repeat. helpers/open-items-gate.cjs (Stop) blocks a first reply that leaves an item
 # out. Runs AFTER the shared-memory fetch above, so the requests are read at origin/main.
 # A failed run prints a NOT-checked line — never silence, never "nothing open".
+boot_mark shared-memory-check
 if [[ -f "$HERE/../scripts/open-items.py" ]]; then
   CLAUDE_PROJECT_DIR="$R" "$PY" "$HERE/../scripts/open-items.py" --owner "$eco_owner" \
       --hook-input "$HOOK_INPUT" 2>/dev/null \
@@ -525,8 +562,22 @@ fi
 # LOG rotation and entry length (operator decision 2026-09-25): the lint named an
 # oversized LOG with a fix text nobody ran, because nothing ran the lint. This is the
 # trigger — read-only, silent unless a month is due or an own entry is over the cap.
+boot_mark open-items
 if [[ -d "${SHARED_MEMORY_REPO:-$HOME/Projects/brain-shared-memory}/.git" ]]; then
   "$PY" "$HERE/../scripts/shared-memory-log-rotate.py" --check 2>/dev/null
+fi
+# Which device runs which core (operator order 2026-10-11): one line, only when a device is
+# behind its pin, runs a core that differs from its plugin, carries local core edits, has not
+# reported for two weeks, or never reported. Reads the LOCAL clone the fetch above refreshed —
+# no network of its own (measured 0.04 s). Full table: core/scripts/device-status.py [--person p].
+if [[ -d "${SHARED_MEMORY_REPO:-$HOME/Projects/brain-shared-memory}/.git" && -f "$HERE/../scripts/device-status.py" ]]; then
+  # This device reports itself first — measured 2026-10-11: the table had run at every start on
+  # two machines and said "never reported" for every device, because nothing ever called
+  # `report`. It writes (one file, commit, push) only when the state changed or the last
+  # report is a week old; the "unchanged" line is swallowed, a write or a WARN stays visible.
+  dev_rep="$(CLAUDE_PROJECT_DIR="$R" "$PY" "$HERE/../scripts/device-status.py" report 2>/dev/null || true)"
+  [[ -n "$dev_rep" && "$dev_rep" != *" unchanged ("* ]] && echo "$dev_rep"
+  "$PY" "$HERE/../scripts/device-status.py" table --brief 2>/dev/null
 fi
 
 # Deadlines (only if the file exists). "Present — check it" was presence, not effect:
@@ -587,10 +638,12 @@ fi
 # non-zero exit here would make the whole bootup a silent failure, and the check would go
 # quiet exactly in the case where it has something to say. Swallowing the code is what
 # keeps the message.
+boot_mark log-lint+deadlines
 if [[ -f "$HERE/../scripts/brain-check.sh" ]]; then
   CLAUDE_PROJECT_DIR="$R" BRAIN_SELFTEST_BG=1 bash "$HERE/../scripts/brain-check.sh" --brief 2>/dev/null || true
 fi
 
+boot_mark brain-check
 echo "=== END BOOTUP ==="
 }
 
@@ -608,6 +661,33 @@ body=$(bootup_body 2>&1 | tr -d '\000-\010\013\014\016-\037\177' | sed 's/</\&lt
 [[ "$body" == *"=== END BOOTUP ==="* ]] || \
   body+=$'\n!! session-bootup aborted early — output INCOMPLETE, checks from here on did NOT run'
 
+# Time budget report — the limit is this hook's own `timeout` in the brain's settings (project,
+# then local); BOOTUP_TIMEOUT_S overrides it (fixtures). Not found: 30 s, the value the core's
+# template ships — the conservative side, it warns early rather than late. Two thirds of the limit
+# is the line: below it nothing is said (a clean check is not a line).
+boot_limit="${BOOTUP_TIMEOUT_S:-}"
+if [[ -z "$boot_limit" ]]; then
+  boot_limit=$("$PY" -c '
+import json, sys
+for f in sys.argv[1:]:
+    try: d = json.load(open(f, encoding="utf-8"))
+    except Exception: continue
+    for grp in (d.get("hooks") or {}).get("SessionStart") or []:
+        for h in grp.get("hooks") or []:
+            if "session-bootup" in str(h.get("command", "")) and h.get("timeout") is not None:
+                print(int(h["timeout"])); sys.exit()
+' "$R/.claude/settings.json" "$R/.claude/settings.local.json" 2>/dev/null)
+fi
+[[ "$boot_limit" =~ ^[0-9]+$ ]] || boot_limit=30
+boot_took=$(( $(date +%s) - BOOT_T0 ))
+if (( boot_took * 3 >= boot_limit * 2 )); then
+  boot_slow=$(awk -v t0="$BOOT_T0" '{ d = $2 - t0; t0 = $2; if (d > 0) print d, $1 }' "${BOOT_PARTS:-/dev/null}" 2>/dev/null \
+    | sort -rn | head -3 | awk '{ printf "%s%s %d s", (NR > 1 ? ", " : ""), $2, $1 }')
+  body+=$'\n'"!! session start took ${boot_took} s of its ${boot_limit} s limit — slowest: ${boot_slow:-every part under 1 s}. Past the limit the harness kills this hook and none of this report arrives; make the slow part cheaper (cache it, background it) before adding a check."
+fi
+[[ -n "${BOOT_PARTS:-}" ]] && rm -f "$BOOT_PARTS"
+# end time budget report
+
 if (( $(printf '%s' "$body" | wc -c) > CAP )); then
   body="$(printf '%s' "$body" | head -c "$CAP")"$'\n[... truncated at 32 KiB]'
 fi
@@ -617,5 +697,12 @@ fi
 printf '%s\n' '<session-bootup trust="local-data" instructions="never">'
 printf '%s\n' "$body"
 printf '%s\n' '</session-bootup>'
-printf '%s\n' '-> Claude: start the first reply WITH a 1-sentence mini-summary (state of things + what is pending; sources: the bootup block above, open tasks, memory). Operator rule 2026-07-29.'
-printf '%s\n' '-> Claude: then the "open for us" items, split by who acts: "n I can answer/handle myself — shall I?" (ONE OK; start none of them without it) + "n need you directly" (up to 3: one short bullet each — what, who needs what; more: offer to list them). Counts as digits. Items reported before and still open: say so, louder. None: "nothing open". A NOT-checked source: say so. Classify every "?" item first: core/scripts/open-items.py --classify. Say each item in plain words (what it is, what it is about) — no circle, priority or ledger codes. Items marked wait need no relay. Carrier: core/helpers/open-items-gate.cjs. Operator rule 2026-10-07.'
+# The opening question ("n I can handle — shall I?") belongs to the session START only (operator
+# correction 2026-10-10: asked again after every compaction, it became a nag). A compaction continues
+# the same session: own items are handled and reported, nothing is asked again.
+if [[ "$HOOK_INPUT" =~ \"source\"[[:space:]]*:[[:space:]]*\"compact\" ]]; then
+  printf '%s\n' '-> Claude: this is a compaction of the SAME session — no opening report, no "shall I?" for own items: the operator was asked at the start. Handle own open items and report what was done; only items that need the operator are named. Operator rule 2026-10-10.'
+else
+  printf '%s\n' '-> Claude: start the first reply WITH a 1-sentence mini-summary (state of things + what is pending; sources: the bootup block above, open tasks, memory). Operator rule 2026-07-29.'
+  printf '%s\n' '-> Claude: then the "open for us" items, split by who acts: "n I can answer/handle myself — shall I?" (ONE OK; start none of them without it) + "n need you directly" (up to 3: one short bullet each — what, who needs what; more: offer to list them). Counts as digits. Items reported before and still open: say so, louder. None: "nothing open". A NOT-checked source: say so. Classify every "?" item first: core/scripts/open-items.py --classify. Say each item in plain words (what it is, what it is about) — no circle, priority or ledger codes. Items marked wait need no relay. Carrier: core/helpers/open-items-gate.cjs. Operator rule 2026-10-07.'
+fi

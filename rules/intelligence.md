@@ -96,7 +96,12 @@ to.)
 open request addressed to this instance, an open PR — reaches the first reply, split by
 WHO has to act. Items the agent can answer or handle itself (its own circle): the count
 and ONE question whether to go ahead — a session usually starts for another reason, so
-the agent starts none of them without that OK. Items that need the operator: the count;
+the agent starts none of them without that OK. That question is asked ONCE, at the session
+start (startup or resume) — never again later in the same session (operator correction
+2026-10-10: "I want to hear that question mainly at the session start, not again
+and again"). After a compaction, after the operator's go, and for every own item that
+turns up mid-session: handle it and report what was done; a report never ends on "n I can
+handle — shall I?". Items that need the operator: the count;
 up to three, one short bullet each (what it is about, who needs what); more than three,
 the offer to list them — a wall of items at session start intimidates. Nothing open: say
 "nothing open". A source that could not be read: say so — never "nothing". An item that
@@ -286,6 +291,29 @@ presentation (operator decision 2026-09-18 — reading every one costs hours to 
   a wired carrier is reported once, and a request from another party gets an answer —
   receipt, state, when it continues (operator decision 2026-10-08). Parked blocks the
   work, never the reply.
+- **A point the operator deferred is said once per session — and only the operator defers**
+  (operator decisions 2026-08-03 and 2026-10-10). Deferred means the operator postponed THIS
+  point in their own words ("later", "not now", "next week", a date). Then it is not raised
+  again in the same session — neither as a question nor as a trailing "still open" line; it
+  comes back when the operator returns to it, when a new measurement changes the situation
+  (data loss turning acute), or once in the next session's start report. A question the
+  operator replied past without addressing it is NOT deferred: it is unanswered, stays open,
+  and is asked again where it matters, louder each time (the repeat rule for open points
+  above). The agent never files its own silence or the operator's silence as a deferral.
+  Carried by `core/helpers/question-gate.cjs`: `deferred` is accepted only with the
+  operator's words as the note; `unanswered` keeps the question listed and askable.
+  **The agent closes its own question once its work has answered it** (operator decision
+  2026-10-11: "yes, the AI may close its own settled questions — but set it up cleanly,
+  document and justify it"): a question the agent asked, then settled by measuring, building
+  or reading instead of waiting, is resolved `answered` by the agent with the resolution in
+  the note; only `deferred` needs the operator's words. Justification: the gate exists so
+  that a question does not scroll away unanswered — a question the work has answered is not
+  that case, and a human made to close it by hand is pure friction (measured 2026-10-11 on a
+  Windows brain: the agent's `resolve` call was refused by the harness classifier because
+  that brain lacked the template's `Bash(node core/helpers/*)` permission, and the operator
+  had to run it; the macOS brain, which carries the permission, closed three such questions
+  the same day). The permission is part of the template; `hook-coverage.py` now reports a
+  brain that does not grant it, like an unwired hook.
 - **Name the server, never "the MCP"** (operator decision 2026-08-20) — also in a
   reconnect request. Generally: before a proposal, check that its load-bearing word is
   unambiguous for the reader; an internal short word can mean something else to them
